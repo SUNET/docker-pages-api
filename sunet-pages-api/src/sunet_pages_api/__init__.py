@@ -14,6 +14,7 @@ import signal
 import yaml
 import subprocess
 import StringIO
+import copy
 
 from werkzeug.exceptions import BadRequest
 from werkzeug.contrib.fixers import ProxyFix
@@ -55,7 +56,7 @@ def _name(r):
 
 def _find_config(r):
    global sites
-   return [(name,config) for name,config in sites.iteritems() if 'git' in config and _clone_url(r) == config['git']]
+   return [(name,copy.deepcopy(config)) for name,config in sites.iteritems() if 'git' in config and _clone_url(r) == config['git']]
 
 def _sync_links(links, path, root):
    logging.info("synchronizing links for %s <- %s in %s" % (path, ",".join(links), root))
@@ -128,15 +129,15 @@ def _p(args, outf=None, ignore_exit=False):
 def _site_publish(local_path, pub_path, config):
    local_path = local_path.rstrip("/")
    pub_path = pub_path.rstrip("/")
-   publish = config.get('publish', ['rsync','--exclude=.git','--delete','-az', "%s/" % local_path, "%s/" % pub_path])
+   publish = config.get('publish', ['rsync','--exclude=.git','--delete','-az'])
    docker_image = config.get('docker', None)
    buf = StringIO.StringIO()
    if docker_image is not None:
-      _p("docker pull %s" % docker_image, outf=buf)
+      _p(['docker','pull',docker_image], outf=buf)
       logger.debug(buf.getvalue())
       publish = ['docker', 'run', docker_image] + publish
 
-   _p(publish, outf=buf)
+   _p(publish + ["%s/" % local_path, "%s/" % pub_path], outf=buf)
    logger.debug(buf.getvalue())
       
 def _site_update(stage_dir, pub_dir, name, config):
