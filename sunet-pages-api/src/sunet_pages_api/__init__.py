@@ -97,7 +97,7 @@ def _site_fetch(local_path, pub_path, config):
      raise ValueError("Unknown repository type")
 
 def _site_update_config(local_path, config):
-   pub_conf = os.path.join(local_path,".sunetpages.yaml")
+   pub_conf = os.path.join(local_path,".sunet-pages.yaml")
    if os.path.exists(pub_conf):
       with open(pub_conf) as fd:
          cfg = yaml.load(fd)
