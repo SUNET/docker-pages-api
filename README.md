@@ -15,7 +15,8 @@ another.site
    git: https://github.com/another/repo.git
    branch: production
    docker: docker.example.com/site_generator
-   publish: generate
+   publish: 
+       - generate
 ```
 
 Sites are staged and inspected for a secondary yaml file in the root of the repository called .sunet-pages.yaml which is loaded into the above configuration for the site matching the git repo URL in the github notification. The first example above would just make the content in the repo available (except the .git directory) in /usr/local/apache2/vhosts/a.site.name (with a link from an.alias.io). The directory layout is suitable for use with mod_vhost_alias. The second example would run the command

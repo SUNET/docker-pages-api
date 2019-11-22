@@ -15,8 +15,9 @@ import yaml
 import subprocess
 import StringIO
 import copy
+import docker
 
-from werkzeug.exceptions import BadRequest
+from werkzeug.exceptions import BadRequest, NotFound, Unauthorized
 from werkzeug.contrib.fixers import ProxyFix
 from multiprocessing import Pool
 
@@ -33,6 +34,7 @@ logging.basicConfig(level=logging.DEBUG,
 
 stage_dir = pyconfig.get("sunetpages.staging", "/var/cache/sunetpages")
 pub_dir = pyconfig.get("sunetpages.root", "/var/www")
+auth_cookie = pyconfig.get("sunetpages.auth_cookie",None)
 sites = dict()
 
 signal.signal(signal.SIGUSR1, pyconfig.reload)
@@ -48,15 +50,15 @@ def _reload():
 
 _reload()
 
-def _clone_url(r):
-   return r['clone_url']
+def _urls(r):
+   return [r[n] for n in ['clone_url','git_url','ssh_url']]
 
 def _name(r):
    return r['full_name']
 
 def _find_config(r):
    global sites
-   return [(name,copy.deepcopy(config)) for name,config in sites.iteritems() if 'git' in config and _clone_url(r) == config['git']]
+   return [(name,copy.deepcopy(config)) for name,config in sites.iteritems() if 'git' in config and config['git'] in _urls(r)]
 
 def _sync_links(links, path, root):
    logging.info("synchronizing links for %s <- %s in %s" % (path, ",".join(links), root))
@@ -111,7 +113,7 @@ def _pstart(args, outf=None, ignore_exit=False):
     return proc
 
 
-def _p(args, outf=None, ignore_exit=False):
+def _p(args, outf=None, errf=None, ignore_exit=False):
     proc = _pstart(args)
     out, err = proc.communicate()
     if err is not None and len(err) > 0:
@@ -122,6 +124,12 @@ def _p(args, outf=None, ignore_exit=False):
     else:
         if out is not None and len(out) > 0:
             logging.debug(out)
+    if errf is not None:
+        with open(errf, "w") as fd:
+            fd.write(err)
+    else:
+        if err is not None and len(err) > 0:
+            logging.debug(err)
     rv = proc.wait()
     if rv and not ignore_exit:
         raise RuntimeError("command exited with code != 0: %d" % rv)
@@ -130,28 +138,38 @@ def _site_publish(local_path, pub_path, config):
    local_path = local_path.rstrip("/")
    pub_path = pub_path.rstrip("/")
    publish = config.get('publish', ['rsync','--exclude=.git','--delete','-az'])
+   publish += ["%s/" % local_path, "%s/" % pub_path]
    docker_image = config.get('docker', None)
-   buf = StringIO.StringIO()
-   if docker_image is not None:
-      _p(['docker','pull',docker_image], outf=buf)
-      logger.debug(buf.getvalue())
-      publish = ['docker', 'run', docker_image] + publish
 
-   _p(publish + ["%s/" % local_path, "%s/" % pub_path], outf=buf)
-   logger.debug(buf.getvalue())
+   if docker_image is not None:
+      if ':' not in docker_image:
+         docker_image = "{!s}:latest".format(docker_image)
+      dc = docker.from_env()
+      img = dc.images.pull(docker_image)
+      logging.debug("about to docker run {!s} {!s} ...".format(docker_image," ".join(publish)))
+      out = dc.containers.run(docker_image,command=publish,volumes_from=['sunet-pages-api'],detach=False)
+      logging.debug(out)
+   else:
+      buf = StringIO.StringIO()
+      _p(publish, outf=buf)
+      logging.debug(buf.getvalue())
       
 def _site_update(stage_dir, pub_dir, name, config):
    logging.info("update called...")
-   local_path = os.path.join(stage_dir, name)
-   pub_path = os.path.join(pub_dir, name)
+   try:
+      local_path = os.path.join(stage_dir, name)
+      pub_path = os.path.join(pub_dir, name)
 
-   _site_fetch(local_path, pub_path, config)
-   _site_update_config(local_path, config)
-   _site_publish(local_path, pub_path, config)
-   _site_config(local_path, pub_dir, config)
+      _site_fetch(local_path, pub_path, config)
+      _site_update_config(local_path, config)
+      _site_publish(local_path, pub_path, config)
+      _site_config(local_path, pub_dir, config)
 
-   if 'domains' in config:
-      _sync_links([os.path.join(pub_dir,domain) for domain in config['domains']], local_path, pub_dir)
+      if 'domains' in config:
+         _sync_links([os.path.join(pub_dir,domain) for domain in config['domains']], local_path, pub_dir)
+   except Exception as err:
+      logging.error(err)
+      raise err
 
 class StreamToLogger(object):
     def __init__(self, logger, log_level=logging.INFO):
@@ -186,10 +204,27 @@ def _github_hook():
    if configs:
       name,config = configs[0]
       res = pool.apply_async(_site_update, (stage_dir, pub_dir, name, config))
+      logging.info("scheduled update of %s" % name)
+      return jsonify(status="ok",name=name)
+   raise NotFound()
 
+@app.route("/notify/simple", methods=["GET","POST"])
+def _simple_hook():
+   global sites
+   global auth_cookie
+   info = request.get_json()
+   if 'name' not in info:
+      raise BadRequest()
+   name = info['name']
+   config = sites.get(name,None)
+   if not config:
+      raise BadRequest()
+   if auth_cookie and not auth_cookie == info['auth']:
+      raise Unauthorized()
+   logging.info("simple notify to %s" % (info['name']))
+   res = pool.apply_async(_site_update, (stage_dir, pub_dir, name, config))
    logging.info("scheduled update of %s" % name)
    return jsonify(status="ok",name=name)
-
 
 def main():
     app.run(host='0.0.0.0')
